@@ -28,7 +28,10 @@ use std::sync::Arc;
 
 use edgequake_core::Workspace;
 use edgequake_llm::traits::{EmbeddingProvider, LLMProvider};
-use edgequake_llm::{OllamaProvider, OpenAIProvider, ProviderFactory};
+use edgequake_llm::{
+    ConfigProviderType, ModelCapabilities, ModelCard, ModelType, OllamaProvider,
+    OpenAICompatibleProvider, OpenAIProvider, ProviderConfig, ProviderFactory,
+};
 
 /// Resolve the embedding provider from environment, optionally overriding the
 /// `fallback` returned by `ProviderFactory::from_env()`.
@@ -77,10 +80,46 @@ pub fn resolve_embedding_provider(
                     .unwrap_or_default();
                 let base_url = embed_base_url.or_else(|| std::env::var("OPENAI_BASE_URL").ok());
 
+                // WHY: OpenAIProvider::with_embedding_model() derives the dimension from
+                // a hardcoded model-name heuristic (text-embedding-3-*, ada-*, else 1536).
+                // Custom/local embedding models (e.g. a self-hosted Qwen3-Embedding server)
+                // don't match any pattern and silently fall back to 1536, corrupting the
+                // pgvector column size. Building via OpenAICompatibleProvider::from_config()
+                // lets us pin the ModelCard's embedding_dimension to the already-resolved
+                // `dimension` (EDGEQUAKE_EMBEDDING_DIMENSION or the known-model table).
                 let provider: Arc<dyn EmbeddingProvider> = if let Some(base_url) = base_url {
-                    Arc::new(
-                        OpenAIProvider::compatible(api_key, base_url).with_embedding_model(&model),
-                    )
+                    let config = ProviderConfig {
+                        name: "openai-compatible-embedding".to_string(),
+                        display_name: "OpenAI-Compatible Embedding".to_string(),
+                        provider_type: ConfigProviderType::OpenAICompatible,
+                        api_key: Some(api_key),
+                        base_url: Some(base_url),
+                        default_embedding_model: Some(model.clone()),
+                        models: vec![ModelCard {
+                            name: model.clone(),
+                            display_name: model.clone(),
+                            model_type: ModelType::Embedding,
+                            capabilities: ModelCapabilities {
+                                embedding_dimension: dimension,
+                                max_embedding_tokens: 8_192,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    match OpenAICompatibleProvider::from_config(config) {
+                        Ok(provider) => Arc::new(provider),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                provider = %provider_name,
+                                "Failed to build dedicated-credentials embedding provider (FIX #163); \
+                                 using default"
+                            );
+                            return fallback;
+                        }
+                    }
                 } else {
                     Arc::new(OpenAIProvider::new(api_key).with_embedding_model(&model))
                 };

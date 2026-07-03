@@ -878,7 +878,7 @@ backend-bg: db-wait ## Run backend in background with PostgreSQL (respects MISTR
 		printf '%s\n' "export EDGEQUAKE_DEV_MODE=\"$(DEV_EDGEQUAKE_DEV_MODE)\"" >> /tmp/edgequake-start.sh; \
 		printf '%s\n' "export EDGEQUAKE_AUTH_ENABLED=\"$(DEV_AUTH_ENABLED)\"" >> /tmp/edgequake-start.sh; \
 		printf '%s\n' "export AUTH_ENABLED=\"$(DEV_AUTH_ENABLED)\"" >> /tmp/edgequake-start.sh; \
-		printf '%s\n' "export EDGEQUAKE_LLM_PROVIDER=\"openai\"" >> /tmp/edgequake-start.sh; \
+		printf '%s\n' "export EDGEQUAKE_LLM_PROVIDER=\"$(if $(EDGEQUAKE_LLM_PROVIDER),$(EDGEQUAKE_LLM_PROVIDER),openai)\"" >> /tmp/edgequake-start.sh; \
 		printf '%s\n' "export EDGEQUAKE_ALLOWED_PROVIDERS=\"*\"" >> /tmp/edgequake-start.sh; \
 		printf '%s\n' "$$_RUN" >> /tmp/edgequake-start.sh; \
 		chmod +x /tmp/edgequake-start.sh; \
