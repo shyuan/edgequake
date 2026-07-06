@@ -432,7 +432,7 @@ impl PdfDocumentStorage for PostgresPdfStorage {
         // @implements FIX-ISSUE-74: Ensure document record exists before FK link
         sqlx::query(
             r#"
-            INSERT INTO documents (id, tenant_id, workspace_id, title, content, status, updated_at)
+            INSERT INTO public.documents (id, tenant_id, workspace_id, title, content, status, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, NOW())
             ON CONFLICT (id) DO UPDATE SET
                 content = EXCLUDED.content,
@@ -479,7 +479,7 @@ impl PdfDocumentStorage for PostgresPdfStorage {
 
         let result = sqlx::query(
             r#"
-            UPDATE documents SET
+            UPDATE public.documents SET
                 chunk_count        = $2,
                 entity_count       = $3,
                 relationship_count = $4,
@@ -532,7 +532,7 @@ impl PdfDocumentStorage for PostgresPdfStorage {
         // @implements FIX-ISSUE-73: Cascade delete pdf_documents/chunks on document removal
         let result = sqlx::query(
             r#"
-            DELETE FROM documents WHERE id = $1
+            DELETE FROM public.documents WHERE id = $1
             "#,
         )
         .bind(document_id)

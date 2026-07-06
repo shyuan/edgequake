@@ -55,7 +55,7 @@ impl TaskStorage for PostgresTaskStorage {
 
         sqlx::query(
             r#"
-            INSERT INTO tasks (
+            INSERT INTO public.tasks (
                 track_id, tenant_id, workspace_id, task_type, status, created_at, updated_at,
                 started_at, completed_at, error_message, error, retry_count,
                 max_retries, consecutive_timeout_failures, circuit_breaker_tripped,
@@ -97,7 +97,7 @@ impl TaskStorage for PostgresTaskStorage {
                 started_at, completed_at, error_message, error, retry_count,
                 max_retries, consecutive_timeout_failures, circuit_breaker_tripped,
                 payload, result
-            FROM tasks
+            FROM public.tasks
             WHERE track_id = $1
             "#,
         )
@@ -172,7 +172,7 @@ impl TaskStorage for PostgresTaskStorage {
     /// serialize/deserialize the JSONB payload column. Workers call this every
     /// 60 seconds during long-running LLM extraction to signal liveness.
     async fn touch_task(&self, track_id: &str) -> TaskResult<()> {
-        sqlx::query("UPDATE tasks SET updated_at = NOW() WHERE track_id = $1")
+        sqlx::query("UPDATE public.tasks SET updated_at = NOW() WHERE track_id = $1")
             .bind(track_id)
             .execute(&*self.pool)
             .await
@@ -191,7 +191,7 @@ impl TaskStorage for PostgresTaskStorage {
 
         let result = sqlx::query(
             r#"
-            UPDATE tasks SET
+            UPDATE public.tasks SET
                 status = $2,
                 updated_at = $3,
                 started_at = $4,
@@ -230,7 +230,7 @@ impl TaskStorage for PostgresTaskStorage {
     }
 
     async fn delete_task(&self, track_id: &str) -> TaskResult<()> {
-        let result = sqlx::query("DELETE FROM tasks WHERE track_id = $1")
+        let result = sqlx::query("DELETE FROM public.tasks WHERE track_id = $1")
             .bind(track_id)
             .execute(&*self.pool)
             .await
@@ -252,7 +252,7 @@ impl TaskStorage for PostgresTaskStorage {
                 started_at, completed_at, error_message, error, retry_count,
                 max_retries, consecutive_timeout_failures, circuit_breaker_tripped,
                 payload, result
-            FROM tasks WHERE 1=1",
+            FROM public.tasks WHERE 1=1",
         );
 
         let mut param_count = 0;
@@ -391,7 +391,7 @@ impl TaskStorage for PostgresTaskStorage {
                 COUNT(*) FILTER (WHERE status = 'failed') as failed,
                 COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled,
                 COUNT(*) as total
-            FROM tasks
+            FROM public.tasks
             WHERE 1=1
             "#,
         );
@@ -469,7 +469,7 @@ impl TaskStorage for PostgresTaskStorage {
                 started_at, completed_at, error_message, error, retry_count,
                 max_retries, consecutive_timeout_failures, circuit_breaker_tripped,
                 payload, result
-            FROM tasks
+            FROM public.tasks
             WHERE workspace_id = $1
               AND task_type = 'pdf_processing'
               AND status IN ('pending', 'processing')
@@ -567,7 +567,7 @@ impl TaskStorage for PostgresTaskStorage {
                     WHERE status = 'indexed'
                     AND completed_at > NOW() - INTERVAL '5 minutes'
                 ) as recent_completed
-            FROM tasks
+            FROM public.tasks
             WHERE ($1::uuid IS NULL OR tenant_id = $1)
               AND ($2::uuid IS NULL OR workspace_id = $2)
             "#,
@@ -620,7 +620,7 @@ impl TaskStorage for PostgresTaskStorage {
 #[cfg(feature = "postgres")]
 impl PostgresTaskStorage {
     async fn get_total_count(&self, filter: TaskFilter) -> TaskResult<u64> {
-        let mut query = String::from("SELECT COUNT(*) FROM tasks WHERE 1=1");
+        let mut query = String::from("SELECT COUNT(*) FROM public.tasks WHERE 1=1");
 
         let mut param_count = 0;
 
