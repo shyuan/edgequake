@@ -629,7 +629,7 @@ impl StorageInspector {
     async fn check_inv03_indexed_docs_without_chunks(&self, report: &mut InspectorReport) {
         let sql = format!(
             r#"SELECT d.id::text
-               FROM documents d
+               FROM public.documents d
                WHERE d.status = 'indexed'
                  AND NOT EXISTS (
                      SELECT 1 FROM {kv} k
@@ -680,7 +680,7 @@ impl StorageInspector {
     async fn check_inv04_cqrs_sync_lag(&self, report: &mut InspectorReport) {
         // Check if entity_sync_mode is 'full' (only then does lag matter)
         let mode: Option<String> = sqlx::query_scalar(
-            "SELECT value::text FROM server_config WHERE key = 'entity_sync_mode'",
+            "SELECT value::text FROM public.server_config WHERE key = 'entity_sync_mode'",
         )
         .fetch_optional(self.pool.as_ref())
         .await
@@ -703,7 +703,7 @@ impl StorageInspector {
         }
 
         let synced_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE sync_status = 'synced'")
+            sqlx::query_scalar("SELECT COUNT(*) FROM public.entities WHERE sync_status = 'synced'")
                 .fetch_one(self.pool.as_ref())
                 .await
                 .unwrap_or(0);
@@ -914,7 +914,7 @@ impl StorageInspector {
     /// enabled, AGE has nodes, but `entities.sync_status='synced'` count is 0.
     async fn check_inv04b_silent_sync_noop(&self, report: &mut InspectorReport) {
         let mode: Option<String> = sqlx::query_scalar(
-            "SELECT value::text FROM server_config WHERE key = 'entity_sync_mode'",
+            "SELECT value::text FROM public.server_config WHERE key = 'entity_sync_mode'",
         )
         .fetch_optional(self.pool.as_ref())
         .await
@@ -948,7 +948,7 @@ impl StorageInspector {
         }
 
         let synced_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE sync_status = 'synced'")
+            sqlx::query_scalar("SELECT COUNT(*) FROM public.entities WHERE sync_status = 'synced'")
                 .fetch_one(self.pool.as_ref())
                 .await
                 .unwrap_or(0);
@@ -1107,12 +1107,13 @@ impl StorageInspector {
                 continue;
             }
             let ws_id = parts[1];
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM workspaces WHERE id::text = $1)")
-                    .bind(ws_id)
-                    .fetch_one(self.pool.as_ref())
-                    .await
-                    .unwrap_or(true); // on error, assume exists (avoid false positive)
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM public.workspaces WHERE workspace_id::text = $1)",
+            )
+            .bind(ws_id)
+            .fetch_one(self.pool.as_ref())
+            .await
+            .unwrap_or(true); // on error, assume exists (avoid false positive)
             if !exists {
                 orphans.push(table.clone());
             }
@@ -1182,7 +1183,7 @@ impl StorageInspector {
                     r#"DELETE FROM {vec} WHERE metadata->>'type' = 'chunk'
                        AND NOT EXISTS (SELECT 1 FROM {kv} k WHERE k.key = {vec}.id)
                        AND NOT EXISTS (
-                           SELECT 1 FROM documents d
+                           SELECT 1 FROM public.documents d
                            WHERE d.id::text = {vec}.metadata->>'document_id'
                              AND d.status = 'indexed'
                        )"#,
