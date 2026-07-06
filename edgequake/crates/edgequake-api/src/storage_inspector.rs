@@ -47,7 +47,7 @@ pub struct InspectorConfig {
     pub kv_table: String,
     /// Vector table name (e.g. "eq_eq_default_vectors").
     pub vector_table: String,
-    /// AGE graph name (e.g. "edgequake").
+    /// AGE graph name (e.g. "eq_eq_default_graph").
     pub graph_name: String,
     /// Threshold (0.0-1.0) above which null materialized columns are a warning.
     pub null_rate_warning_threshold: f64,
@@ -66,7 +66,12 @@ impl Default for InspectorConfig {
         Self {
             kv_table: "eq_eq_default_kv".to_string(),
             vector_table: "eq_eq_default_vectors".to_string(),
-            graph_name: "edgequake".to_string(),
+            // WHY: must match the storage adapter's derivation
+            // (`eq_{table_prefix}_graph`, graph/mod.rs) for the default
+            // namespace. The old value "edgequake" was never a real AGE
+            // graph name, which silently disabled every graph-side
+            // invariant check since this inspector was introduced.
+            graph_name: "eq_eq_default_graph".to_string(),
             null_rate_warning_threshold: 0.05,  // 5%
             null_rate_critical_threshold: 0.20, // 20%
             sync_lag_warning_threshold: 0.01,   // 1%
@@ -794,7 +799,7 @@ impl StorageInspector {
     /// was never refreshed (file 16 §3), so the invariant would fire on every
     /// document. The authoritative per-doc entity count is the AGE graph;
     /// this invariant samples documents and compares their relational
-    /// `entity_count` against a Cypher count keyed by the chunk-id prefix,
+    /// `entity_count` against an AGE vertex-table count keyed by the chunk-id prefix,
     /// flagging CRITICAL drift so the admin endpoint (P-D2) can surface it.
     ///
     /// Skips docs in `processing`/`pending` state (mid-ingestion, E16) and
@@ -814,7 +819,7 @@ impl StorageInspector {
         // by ordering on id so each run sees a different slice).
         let sample_sql = r#"
             SELECT id::text, chunk_count, entity_count
-            FROM documents
+            FROM public.documents
             WHERE status IN ('indexed', 'completed', 'partial_failure', 'failed')
               AND COALESCE(chunk_count, 0) > 0
             ORDER BY id
@@ -838,32 +843,39 @@ impl StorageInspector {
         let mut drifted = 0usize;
         let mut samples = Vec::new();
         for (doc_id, _chunk_count, pg_entity_count) in rows {
-            // Direct Cypher via the AGE vertex table: count nodes whose
-            // source_ids array (or legacy source_id) starts with the doc's
-            // chunk prefix. Mirrors `pg_node_count_by_source_prefix`.
+            // Plain SQL against the AGE vertex table: count nodes whose
+            // source_chunk_ids / source_ids array (or legacy source_id
+            // string) references this doc's chunk prefix. Mirrors
+            // `pg_node_count_by_source_prefix`. Deliberately NOT `cypher()`:
+            // the inspector never runs `LOAD 'age'` session setup, so
+            // `cypher()` only worked by accident on connections polluted by
+            // prior graph-adapter usage; plain SQL is immune to pooled
+            // session state.
             let prefix = format!("{}-chunk-", doc_id);
             let escaped = prefix.replace('\'', "''");
-            let cypher = format!(
-                "MATCH (n:Node) WHERE \
-                    (n.source_ids IS NOT NULL AND \
-                     any(s IN n.source_ids WHERE s STARTS WITH '{}')) \
-                    OR (n.source_id IS NOT NULL AND n.source_id STARTS WITH '{}') \
-                 RETURN count(n)",
-                escaped, escaped
-            );
+            let props = "ag_catalog.agtype_to_json(v.properties)::jsonb";
             let age_sql = format!(
-                "SELECT * FROM cypher('{}', $$ {} $$) AS (result agtype)",
-                self.config.graph_name, cypher
+                "SELECT count(*)::bigint FROM {graph}.\"_ag_label_vertex\" v \
+                 WHERE ({props})->>'source_id' LIKE '{esc}%' \
+                    OR EXISTS (SELECT 1 FROM jsonb_array_elements_text( \
+                         CASE WHEN jsonb_typeof(({props})->'source_ids') = 'array' \
+                              THEN ({props})->'source_ids' ELSE '[]'::jsonb END) s \
+                       WHERE s LIKE '{esc}%') \
+                    OR EXISTS (SELECT 1 FROM jsonb_array_elements_text( \
+                         CASE WHEN jsonb_typeof(({props})->'source_chunk_ids') = 'array' \
+                              THEN ({props})->'source_chunk_ids' ELSE '[]'::jsonb END) s \
+                       WHERE s LIKE '{esc}%')",
+                graph = self.config.graph_name,
+                props = props,
+                esc = escaped
             );
-            // AGE returns agtype; coerce to text then parse.
-            let age_count: i64 = match sqlx::query_scalar::<_, String>(&age_sql)
+            let age_count: i64 = match sqlx::query_scalar::<_, i64>(&age_sql)
                 .fetch_one(self.pool.as_ref())
                 .await
                 .ok()
-                .and_then(|s| s.trim_matches('"').parse::<i64>().ok())
             {
                 Some(n) => n,
-                None => continue, // AGE query hiccup — skip, do not false-positive (E8)
+                None => continue, // query hiccup — skip, do not false-positive (E8)
             };
 
             if age_count as i32 != pg_entity_count {
@@ -1008,25 +1020,30 @@ impl StorageInspector {
         let mut orphans = Vec::new();
         for (vec_id, entity_name) in rows {
             let Some(name) = entity_name else { continue };
-            // Check AGE for a node with this id (entity names are normalized to
-            // the node id). Use a parameterized cypher via the vertex table.
+            // Check AGE for a node with this entity name via plain SQL on the
+            // vertex table (not `cypher()` — see INV-C for why). Live nodes
+            // key entities by `node_id`/`label`; older write paths used
+            // `id`/`name` — accept any of the four so a schema-era mismatch
+            // does not false-positive every vector as an orphan.
             let escaped = name.replace('\'', "''");
-            let cypher = format!(
-                "MATCH (n:Node) WHERE n.id = '{}' OR n.name = '{}' RETURN count(n)",
-                escaped, escaped
-            );
+            let props = "ag_catalog.agtype_to_json(v.properties)::jsonb";
             let age_sql = format!(
-                "SELECT * FROM cypher('{}', $$ {} $$) AS (result agtype)",
-                self.config.graph_name, cypher
+                "SELECT count(*)::bigint FROM {graph}.\"_ag_label_vertex\" v \
+                 WHERE ({props})->>'node_id' = '{esc}' \
+                    OR ({props})->>'label' = '{esc}' \
+                    OR ({props})->>'id' = '{esc}' \
+                    OR ({props})->>'name' = '{esc}'",
+                graph = self.config.graph_name,
+                props = props,
+                esc = escaped
             );
-            let count: i64 = match sqlx::query_scalar::<_, String>(&age_sql)
+            let count: i64 = match sqlx::query_scalar::<_, i64>(&age_sql)
                 .fetch_one(self.pool.as_ref())
                 .await
                 .ok()
-                .and_then(|s| s.trim_matches('"').parse::<i64>().ok())
             {
                 Some(n) => n,
-                None => continue, // AGE hiccup — skip, do not false-positive (E8)
+                None => continue, // query hiccup — skip, do not false-positive (E8)
             };
             if count == 0 {
                 orphans.push(vec_id);
